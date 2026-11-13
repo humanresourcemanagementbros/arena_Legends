@@ -74,11 +74,11 @@ h1 span{color:var(--cyan)}
     <div class="section-title">ONLINE ROOM</div>
     <div class="room-row">
       <button id="hostButton">HOST ROOM</button>
-      <input id="roomInput" maxlength="4" placeholder="4-CHAR CODE" aria-label="Room code">
+      <input id="roomInput" maxlength="6" placeholder="6-CHAR CODE" aria-label="Room code">
       <button id="joinButton">JOIN</button>
     </div>
     <div id="roomStatus" class="status" role="status">Online play needs an internet connection and PeerJS signaling.</div>
-    <p class="hint">Tap or drag anywhere to dash. Grab gold orbs for points and knock rivals out for +3. Your best solo score is saved on this device.</p>
+    <p class="hint">Tap or drag anywhere to dash. Grab gold orbs for points and knock rivals out for +3. For phone-to-phone play, both players must open the same web-hosted game page; the host must keep it open.</p>
   </main>
 </div>
 <div id="hud" class="hidden">
@@ -107,7 +107,7 @@ h1 span{color:var(--cyan)}
   ];
   const rand=(a,b)=>a+Math.random()*(b-a), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
   const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
-  let selected="volt", remoteCharacter="volt", mode="solo", running=false, lastFrame=0, elapsed=0, gameTime=60, arena={x:0,y:0,r:0}, players=[], orbs=[], particles=[], popups=[], shake=0, combo=1, comboTime=0, orbChain=0, peer=null, conn=null, role="", roomCode="", lastNetwork=0, nextOrb=0, wave=1, muted=false, audio=null, pointerTarget=null, audioReady=false, joinAttempts=0, joinRetryTimer=null, joinAttemptTimer=null;
+  let selected="volt", remoteCharacter="volt", mode="solo", running=false, lastFrame=0, elapsed=0, gameTime=60, arena={x:0,y:0,r:0}, players=[], orbs=[], particles=[], popups=[], shake=0, combo=1, comboTime=0, orbChain=0, peer=null, conn=null, role="", roomCode="", lastNetwork=0, nextOrb=0, wave=1, muted=false, audio=null, pointerTarget=null, audioReady=false, joinAttempts=0, joinRetryTimer=null, joinAttemptTimer=null, roomWakeLock=null;
   const bestKey="neon-bash-best-v1";
 
   function drawSigil(c, x,y,r,alpha=1) {
@@ -209,8 +209,10 @@ h1 span{color:var(--cyan)}
   function endGame(won,reason){if(!running)return;running=false;const me=mode==="online"&&role==="guest"?players[1]:players[0],best=Number(localStorage.getItem(bestKey)||0);if(mode!=="online"&&me&&me.score>best)localStorage.setItem(bestKey,String(me.score));$("hud").classList.add("hidden");$("overlay").classList.remove("hidden");$("resultTitle").textContent=won?"VICTORY":"DEFEAT";$("resultTitle").style.color=won?"#00f3ff":"#ff0055";$("resultText").textContent=`${reason} · Score ${me?me.score:0}${mode!=="online"?` · Best ${Math.max(best,me?me.score:0)}`:""}`;if(mode==="online"&&role==="host")broadcast({type:"gameover",won:won,score:me?me.score:0})}
   function home(){running=false;stopNetwork();$("overlay").classList.add("hidden");$("hud").classList.add("hidden");$("home").classList.remove("hidden");$("roomStatus").textContent="Online play needs an internet connection and PeerJS signaling."}
   function updateStatus(text){$("roomStatus").textContent=text}
-  function stopNetwork(){if(joinRetryTimer!==null){clearTimeout(joinRetryTimer);joinRetryTimer=null}if(joinAttemptTimer!==null){clearTimeout(joinAttemptTimer);joinAttemptTimer=null}joinAttempts=0;if(conn){try{conn.close()}catch(e){console.warn(e)}conn=null}if(peer){try{peer.destroy()}catch(e){console.warn(e)}peer=null}role="";roomCode=""}
-  function code(){const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";for(let i=0;i<4;i++)s+=alphabet[Math.floor(Math.random()*alphabet.length)];return s}
+  function stopNetwork(){if(joinRetryTimer!==null){clearTimeout(joinRetryTimer);joinRetryTimer=null}if(joinAttemptTimer!==null){clearTimeout(joinAttemptTimer);joinAttemptTimer=null}joinAttempts=0;if(roomWakeLock){const lock=roomWakeLock;roomWakeLock=null;lock.release().catch(e=>console.warn("Could not release screen wake lock",e))}if(conn){try{conn.close()}catch(e){console.warn(e)}conn=null}if(peer){try{peer.destroy()}catch(e){console.warn(e)}peer=null}role="";roomCode=""}
+  function code(){const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";for(let i=0;i<6;i++)s+=alphabet[Math.floor(Math.random()*alphabet.length)];return s}
+  async function keepRoomAwake(){if(role!=="host"||document.hidden||!navigator.wakeLock||roomWakeLock)return;try{const lock=await navigator.wakeLock.request("screen");if(role!=="host"||document.hidden){await lock.release();return}roomWakeLock=lock;lock.addEventListener("release",()=>{roomWakeLock=null})}catch(e){console.warn("Screen wake lock unavailable",e)}}
+  document.addEventListener("visibilitychange",()=>{if(role==="host"&&!document.hidden)keepRoomAwake()});
   function createPeer(id){if(!window.Peer){updateStatus("PeerJS failed to load. Check your internet connection and try again.");return null}try{return new Peer(id,{debug:0})}catch(e){console.error("PeerJS setup failed",e);updateStatus("Could not start online play. Please try again.");return null}}
   function watchSignaling(peerInstance){
     peerInstance.on("disconnected",()=>{
@@ -239,15 +241,15 @@ h1 span{color:var(--cyan)}
     c.on("error",e=>{console.error("Peer connection error",e);clearAttemptTimer();if(conn===c)conn=null;if(e.type==="peer-unavailable")scheduleJoinRetry();else updateStatus("Could not connect. Check the code and try again.")})
   }
   function hostRoom(){
-    stopNetwork();const room=code();roomCode=room;role="host";mode="online";updateStatus(`Creating room NBASH-${room}...`);
+    stopNetwork();const room=code();roomCode=room;role="host";mode="online";updateStatus(`Creating room NBASH-${room}...`);keepRoomAwake();
     peer=createPeer("NBASH-"+room);if(!peer)return;
     const hostPeer=peer;let roomAnnounced=false;watchSignaling(hostPeer);
-    hostPeer.on("open",()=>{if(roomAnnounced){if(!conn||!conn.open)updateStatus(`Room NBASH-${room} reconnected and ready.`);return}roomAnnounced=true;updateStatus(`Room NBASH-${room} ready. Share your invite link.`);const u=new URL(location.href);u.searchParams.set("room",room);$("roomInput").value=room;try{navigator.clipboard.writeText(u.href).then(()=>{if(role==="host"&&peer===hostPeer&&(!conn||!conn.open))updateStatus(`Invite link copied! Room NBASH-${room}`)}).catch(()=>{})}catch(e){}});
+    hostPeer.on("open",()=>{if(roomAnnounced){if(!conn||!conn.open)updateStatus(`Room NBASH-${room} reconnected and ready. Keep this page open.`);return}roomAnnounced=true;updateStatus(`Room NBASH-${room} ready. Keep this page open and share the code.`);$("roomInput").value=room;if(location.protocol==="http:"||location.protocol==="https:"){const u=new URL(location.href);u.searchParams.set("room",room);try{navigator.clipboard.writeText(u.href).then(()=>{if(role==="host"&&peer===hostPeer&&(!conn||!conn.open))updateStatus(`Invite link copied! Room NBASH-${room} is live.`)}).catch(()=>{})}catch(e){}}});
     hostPeer.on("connection",c=>{if(conn&&conn.open){c.close();return}conn=c;role="host";c.on("open",()=>{startGame("online");role="host";updateStatus("Player 2 connected. Fight!");c.send({type:"start",character:selected})});c.on("data",onNetworkData);c.on("close",()=>{if(conn!==c)return;conn=null;if(running)endGame(true,"OPPONENT LEFT");updateStatus("Opponent disconnected. Room is still open.")});c.on("error",e=>{console.error("Peer connection error",e);updateStatus("Connection error. Try hosting again.")})});
     hostPeer.on("error",e=>{console.error("Peer error",e);if(e.type==="unavailable-id"){updateStatus("Room code collision. Please host again.")}else updateStatus("Online connection failed. Check your network.")})
   }
   function joinRoom(){
-    const room=$("roomInput").value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(-4);if(room.length!==4){updateStatus("Enter a 4-character room code.");return}
+    const room=$("roomInput").value.toUpperCase().replace(/[^A-Z0-9]/g,"");if(!/^(?:[A-Z0-9]{4}|[A-Z0-9]{6})$/.test(room)){updateStatus("Enter a 4- or 6-character room code.");return}
     stopNetwork();roomCode=room;role="guest";mode="online";joinAttempts=0;updateStatus(`Connecting to NBASH-${room}...`);peer=createPeer();if(!peer)return;
     watchSignaling(peer);
     peer.on("open",connectToRoom);
@@ -272,9 +274,9 @@ h1 span{color:var(--cyan)}
   $("muteButton").addEventListener("click",()=>{muted=!muted;$("muteButton").textContent=muted?"🔇":"🔊";unlockAudio()});
   $("leaveButton").addEventListener("click",home);$("homeButton").addEventListener("click",home);
   $("rematchButton").addEventListener("click",()=>{if(mode==="online"){if(role==="host"&&conn&&conn.open){startGame("online");role="host";conn.send({type:"start",character:selected})}else if(role==="guest"&&conn&&conn.open){conn.send({type:"rematch"});$("resultText").textContent="Waiting for host to restart..."}else home()}else startGame(mode)});
-  $("roomInput").addEventListener("input",e=>{e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,4)});
+  $("roomInput").addEventListener("input",e=>{e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6)});
   addEventListener("keydown",e=>{if(e.key==="Escape"&&running)home()});
-  const params=new URLSearchParams(location.search),invited=params.get("room");if(invited&&/^[A-Z0-9]{4}$/i.test(invited))$("roomInput").value=invited.toUpperCase();
+  const params=new URLSearchParams(location.search),invited=params.get("room");if(invited&&/^(?:[A-Z0-9]{4}|[A-Z0-9]{6})$/i.test(invited))$("roomInput").value=invited.toUpperCase();
   if(!navigator.clipboard) $("roomStatus").textContent="Online play needs internet. Copy the invite URL from your address bar to share.";
 })();
 </script>
