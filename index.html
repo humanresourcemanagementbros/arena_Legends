@@ -107,7 +107,7 @@ h1 span{color:var(--cyan)}
   ];
   const rand=(a,b)=>a+Math.random()*(b-a), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
   const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
-  let selected="volt", remoteCharacter="volt", mode="solo", running=false, lastFrame=0, elapsed=0, gameTime=60, arena={x:0,y:0,r:0}, players=[], orbs=[], particles=[], popups=[], shake=0, combo=1, comboTime=0, orbChain=0, peer=null, conn=null, role="", roomCode="", lastNetwork=0, nextOrb=0, wave=1, muted=false, audio=null, pointerTarget=null, audioReady=false;
+  let selected="volt", remoteCharacter="volt", mode="solo", running=false, lastFrame=0, elapsed=0, gameTime=60, arena={x:0,y:0,r:0}, players=[], orbs=[], particles=[], popups=[], shake=0, combo=1, comboTime=0, orbChain=0, peer=null, conn=null, role="", roomCode="", lastNetwork=0, nextOrb=0, wave=1, muted=false, audio=null, pointerTarget=null, audioReady=false, joinAttempts=0, joinRetryTimer=null, joinAttemptTimer=null;
   const bestKey="neon-bash-best-v1";
 
   function drawSigil(c, x,y,r,alpha=1) {
@@ -209,21 +209,49 @@ h1 span{color:var(--cyan)}
   function endGame(won,reason){if(!running)return;running=false;const me=mode==="online"&&role==="guest"?players[1]:players[0],best=Number(localStorage.getItem(bestKey)||0);if(mode!=="online"&&me&&me.score>best)localStorage.setItem(bestKey,String(me.score));$("hud").classList.add("hidden");$("overlay").classList.remove("hidden");$("resultTitle").textContent=won?"VICTORY":"DEFEAT";$("resultTitle").style.color=won?"#00f3ff":"#ff0055";$("resultText").textContent=`${reason} · Score ${me?me.score:0}${mode!=="online"?` · Best ${Math.max(best,me?me.score:0)}`:""}`;if(mode==="online"&&role==="host")broadcast({type:"gameover",won:won,score:me?me.score:0})}
   function home(){running=false;stopNetwork();$("overlay").classList.add("hidden");$("hud").classList.add("hidden");$("home").classList.remove("hidden");$("roomStatus").textContent="Online play needs an internet connection and PeerJS signaling."}
   function updateStatus(text){$("roomStatus").textContent=text}
-  function stopNetwork(){if(conn){try{conn.close()}catch(e){console.warn(e)}conn=null}if(peer){try{peer.destroy()}catch(e){console.warn(e)}peer=null}role="";roomCode=""}
+  function stopNetwork(){if(joinRetryTimer!==null){clearTimeout(joinRetryTimer);joinRetryTimer=null}if(joinAttemptTimer!==null){clearTimeout(joinAttemptTimer);joinAttemptTimer=null}joinAttempts=0;if(conn){try{conn.close()}catch(e){console.warn(e)}conn=null}if(peer){try{peer.destroy()}catch(e){console.warn(e)}peer=null}role="";roomCode=""}
   function code(){const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";for(let i=0;i<4;i++)s+=alphabet[Math.floor(Math.random()*alphabet.length)];return s}
   function createPeer(id){if(!window.Peer){updateStatus("PeerJS failed to load. Check your internet connection and try again.");return null}try{return new Peer(id,{debug:0})}catch(e){console.error("PeerJS setup failed",e);updateStatus("Could not start online play. Please try again.");return null}}
+  function watchSignaling(peerInstance){
+    peerInstance.on("disconnected",()=>{
+      if(peer!==peerInstance)return;
+      updateStatus("Signaling disconnected. Reconnecting...");
+      try{peerInstance.reconnect()}catch(e){console.error("PeerJS reconnect failed",e);updateStatus("Could not reconnect to online service. Try hosting or joining again.")}
+    })
+  }
+  function scheduleJoinRetry(){
+    if(joinRetryTimer!==null||role!=="guest"||(conn&&conn.open))return;
+    if(joinAttempts>=5){updateStatus("Room not found. Check the code and make sure the host is still online.");return}
+    updateStatus(`Room not visible yet. Retrying (${joinAttempts+1}/5)...`);
+    joinRetryTimer=setTimeout(()=>{joinRetryTimer=null;connectToRoom()},1000)
+  }
+  function connectToRoom(){
+    if(!peer||peer.destroyed||role!=="guest"||(conn&&conn.open))return;
+    if(joinRetryTimer!==null){clearTimeout(joinRetryTimer);joinRetryTimer=null}
+    if(peer.disconnected){updateStatus("Reconnecting to online service...");try{peer.reconnect()}catch(e){console.error("PeerJS reconnect failed",e);updateStatus("Could not reconnect to online service. Try joining again.")}return}
+    joinAttempts++;
+    const c=peer.connect("NBASH-"+roomCode,{reliable:true});conn=c;
+    const clearAttemptTimer=()=>{if(joinAttemptTimer!==null){clearTimeout(joinAttemptTimer);joinAttemptTimer=null}};
+    joinAttemptTimer=setTimeout(()=>{joinAttemptTimer=null;if(conn!==c||c.open)return;conn=null;c.close();scheduleJoinRetry()},8000);
+    c.on("open",()=>{if(conn!==c)return;clearAttemptTimer();updateStatus("Connected. Waiting for the host...");c.send({type:"hello",character:selected})});
+    c.on("data",onNetworkData);
+    c.on("close",()=>{if(conn!==c)return;clearAttemptTimer();conn=null;if(running)endGame(false,"CONNECTION LOST");else if(role==="guest")scheduleJoinRetry();updateStatus("Connection closed.")});
+    c.on("error",e=>{console.error("Peer connection error",e);clearAttemptTimer();if(conn===c)conn=null;if(e.type==="peer-unavailable")scheduleJoinRetry();else updateStatus("Could not connect. Check the code and try again.")})
+  }
   function hostRoom(){
     stopNetwork();const room=code();roomCode=room;role="host";mode="online";updateStatus(`Creating room NBASH-${room}...`);
     peer=createPeer("NBASH-"+room);if(!peer)return;
-    peer.on("open",()=>{updateStatus(`Room NBASH-${room} ready. Share your invite link.`);const u=new URL(location.href);u.searchParams.set("room",room);$("roomInput").value=room;try{navigator.clipboard.writeText(u.href).then(()=>updateStatus(`Invite link copied! Room NBASH-${room}`)).catch(()=>{})}catch(e){}});
-    peer.on("connection",c=>{if(conn){c.close();return}conn=c;role="host";conn.on("open",()=>{startGame("online");role="host";updateStatus("Player 2 connected. Fight!");conn.send({type:"start",character:selected})});conn.on("data",onNetworkData);conn.on("close",()=>{if(running)endGame(true,"OPPONENT LEFT");updateStatus("Opponent disconnected.")});conn.on("error",e=>{console.error("Peer connection error",e);updateStatus("Connection error. Try hosting again.")})});
-    peer.on("error",e=>{console.error("Peer error",e);if(e.type==="unavailable-id"){updateStatus("Room code collision. Please host again.")}else updateStatus("Online connection failed. Check your network.")})
+    const hostPeer=peer;let roomAnnounced=false;watchSignaling(hostPeer);
+    hostPeer.on("open",()=>{if(roomAnnounced){if(!conn||!conn.open)updateStatus(`Room NBASH-${room} reconnected and ready.`);return}roomAnnounced=true;updateStatus(`Room NBASH-${room} ready. Share your invite link.`);const u=new URL(location.href);u.searchParams.set("room",room);$("roomInput").value=room;try{navigator.clipboard.writeText(u.href).then(()=>{if(role==="host"&&peer===hostPeer&&(!conn||!conn.open))updateStatus(`Invite link copied! Room NBASH-${room}`)}).catch(()=>{})}catch(e){}});
+    hostPeer.on("connection",c=>{if(conn&&conn.open){c.close();return}conn=c;role="host";c.on("open",()=>{startGame("online");role="host";updateStatus("Player 2 connected. Fight!");c.send({type:"start",character:selected})});c.on("data",onNetworkData);c.on("close",()=>{if(conn!==c)return;conn=null;if(running)endGame(true,"OPPONENT LEFT");updateStatus("Opponent disconnected. Room is still open.")});c.on("error",e=>{console.error("Peer connection error",e);updateStatus("Connection error. Try hosting again.")})});
+    hostPeer.on("error",e=>{console.error("Peer error",e);if(e.type==="unavailable-id"){updateStatus("Room code collision. Please host again.")}else updateStatus("Online connection failed. Check your network.")})
   }
   function joinRoom(){
     const room=$("roomInput").value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(-4);if(room.length!==4){updateStatus("Enter a 4-character room code.");return}
-    stopNetwork();roomCode=room;role="guest";mode="online";updateStatus(`Connecting to NBASH-${room}...`);peer=createPeer();if(!peer)return;
-    peer.on("open",()=>{conn=peer.connect("NBASH-"+room,{reliable:true});conn.on("open",()=>{updateStatus("Connected. Waiting for the host...");conn.send({type:"hello",character:selected})});conn.on("data",onNetworkData);conn.on("close",()=>{if(running)endGame(false,"CONNECTION LOST");updateStatus("Connection closed.")});conn.on("error",e=>{console.error("Peer connection error",e);updateStatus("Could not connect. Check the code and try again.")})});
-    peer.on("error",e=>{console.error("Peer error",e);updateStatus(e.type==="peer-unavailable"?"Room not found. Check the code.":"Online connection failed. Try again.")})
+    stopNetwork();roomCode=room;role="guest";mode="online";joinAttempts=0;updateStatus(`Connecting to NBASH-${room}...`);peer=createPeer();if(!peer)return;
+    watchSignaling(peer);
+    peer.on("open",connectToRoom);
+    peer.on("error",e=>{console.error("Peer error",e);if(e.type==="peer-unavailable"){if(joinAttemptTimer!==null){clearTimeout(joinAttemptTimer);joinAttemptTimer=null}if(conn&&!conn.open){const failed=conn;conn=null;failed.close()}scheduleJoinRetry()}else updateStatus("Online connection failed. Try again.")})
   }
   function onNetworkData(data){
     if(!data||typeof data!=="object")return;
